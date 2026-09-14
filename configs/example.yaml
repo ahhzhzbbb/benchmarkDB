@@ -1,0 +1,80 @@
+# Example benchmark configuration
+# See benchmark_specification.md for full documentation.
+
+# Which database to benchmark (switch between "redis" and "aerospike").
+database:
+  type: redis
+
+# Redis Cluster connection settings.
+# Benchmark client uses Cluster-aware client for topology discovery.
+redis:
+  startup_nodes:
+    - redis-cluster-0:6379
+    - redis-cluster-1:6379
+    - redis-cluster-2:6379
+  password: ""
+  max_retries: 3
+  pool_size: 100
+  read_timeout: "3s"
+  write_timeout: "3s"
+
+# Aerospike cluster connection settings.
+aerospike:
+  hosts:
+    - db-0:3000
+    - db-1:3000
+    - db-2:3000
+  namespace: benchmark
+  auth_user: ""
+  auth_password: ""
+  total_timeout: "5s"
+  socket_timeout: "3s"
+
+# Workload definition.
+# type: get | set | delete | ttl | equality_query | range_query | mixed
+workload:
+  type: mixed
+  operations:
+    get: 50
+    set: 20
+    delete: 10
+    ttl: 0
+    equality_query: 15
+    range_query: 5
+
+# Dataset generation parameters.
+# Same seed MUST produce identical data for both databases.
+dataset:
+  key_count: 1000000
+  value_size: 1024          # bytes per record
+  seed: 12345               # deterministic seed
+  namespace: benchmark
+  set: session
+  string_cardinality: 1000  # distinct values per string field
+  numeric_min: 1700000000   # Unix timestamp range start
+  numeric_max: 1710000000   # Unix timestamp range end
+  ttl: "300s"               # TTL for TTL workload
+
+# Benchmark execution parameters.
+benchmark:
+  warmup: "10s"
+  duration: "60s"
+  concurrency: 100
+  phases:
+    - connectivity
+    - single
+    - mixed
+  concurrency_steps:
+    - 1
+    - 10
+    - 50
+    - 100
+    - 200
+    - 500
+  # Scenario A: equal_resource | Scenario B: production
+  scenario: equal_resource
+
+# Output format: text | json | both
+output:
+  format: both
+  file: "/tmp/benchmark-result.json"

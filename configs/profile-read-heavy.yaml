@@ -1,0 +1,38 @@
+# Read-heavy benchmark profile
+# WARNING: This is a SYNTHETIC workload. Ratios do NOT represent production traffic.
+
+database:
+  type: redis
+
+workload:
+  type: mixed
+  operations:
+    get: 70
+    set: 15
+    delete: 5
+    ttl: 0
+    equality_query: 7
+    range_query: 3
+
+dataset:
+  key_count: 500000
+  value_size: 1024
+  seed: 12345
+  namespace: benchmark
+  set: session
+  string_cardinality: 1000
+  numeric_min: 1700000000
+  numeric_max: 1710000000
+
+benchmark:
+  warmup: "10s"
+  duration: "60s"
+  concurrency: 50
+  phases:
+    - connectivity
+    - mixed
+  scenario: equal_resource
+
+output:
+  format: both
+  file: "/tmp/benchmark-read-heavy.json"
