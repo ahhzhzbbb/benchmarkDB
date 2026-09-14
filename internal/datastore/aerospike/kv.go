@@ -55,6 +55,10 @@ func (s *Store) Get(ctx context.Context, namespace, set, key string) (*datastore
 
 	rec, err := s.client.Get(nil, aeroKey)
 	if err != nil {
+		var ae *aero.AerospikeError
+		if errors.As(err, &ae) && ae.ResultCode == aerotypes.KEY_NOT_FOUND_ERROR {
+			return nil, nil
+		}
 		return nil, &bencherr.ConnectionError{
 			Database: "Aerospike",
 			Host:     "",

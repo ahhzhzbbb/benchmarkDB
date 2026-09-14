@@ -90,12 +90,13 @@ func (s *Store) CreateIndex(ctx context.Context, def datastore.IndexDefinition) 
 }
 
 // DropIndex removes a secondary index.
-func (s *Store) DropIndex(ctx context.Context, namespace, indexName string) error {
-	err := s.client.Do(ctx, "FT.DROPINDEX", indexName).Err()
+func (s *Store) DropIndex(ctx context.Context, namespace, set, indexName string) error {
+	fullIndexName := makeIndexName(namespace, set, indexName)
+	err := s.client.Do(ctx, "FT.DROPINDEX", fullIndexName).Err()
 	if err != nil {
 		return &bencherr.IndexError{
 			Database:  "Redis Cluster",
-			IndexName: indexName,
+			IndexName: fullIndexName,
 			Operation: "drop",
 			Cause:     err,
 		}
@@ -144,12 +145,11 @@ func (s *Store) RangeQuery(ctx context.Context, req datastore.RangeQueryRequest)
 
 // IndexReady checks whether an index has finished building by examining
 // FT.INFO output for num_docs and indexing status.
-func (s *Store) IndexReady(ctx context.Context, namespace, indexName string, expectedDocs int) (bool, error) {
-	// Try finding the full index name (namespace:set:indexName format).
-	// We need to search because we might receive just the indexName.
-	result, err := s.client.Do(ctx, "FT.INFO", indexName).Result()
+func (s *Store) IndexReady(ctx context.Context, namespace, set, indexName string, expectedDocs int) (bool, error) {
+	fullIndexName := makeIndexName(namespace, set, indexName)
+	
+	result, err := s.client.Do(ctx, "FT.INFO", fullIndexName).Result()
 	if err != nil {
-		// If the simple name doesn't work, the caller should provide the full name.
 		return false, err
 	}
 

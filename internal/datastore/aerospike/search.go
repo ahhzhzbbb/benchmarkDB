@@ -65,7 +65,7 @@ func (s *Store) CreateIndex(ctx context.Context, def datastore.IndexDefinition) 
 }
 
 // DropIndex removes a secondary index.
-func (s *Store) DropIndex(ctx context.Context, namespace, indexName string) error {
+func (s *Store) DropIndex(ctx context.Context, namespace, set, indexName string) error {
 	if err := s.client.DropIndex(nil, namespace, "", indexName); err != nil {
 		return &bencherr.IndexError{
 			Database:  "Aerospike",
@@ -131,7 +131,7 @@ func (s *Store) RangeQuery(ctx context.Context, req datastore.RangeQueryRequest)
 
 // IndexReady checks whether a secondary index has finished building.
 // Uses sindex info command to check load percentage.
-func (s *Store) IndexReady(ctx context.Context, namespace, indexName string, expectedDocs int) (bool, error) {
+func (s *Store) IndexReady(ctx context.Context, namespace, set, indexName string, expectedDocs int) (bool, error) {
 	nodes := s.client.GetNodes()
 	if len(nodes) == 0 {
 		return false, fmt.Errorf("no nodes available")

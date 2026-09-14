@@ -137,7 +137,7 @@ func (e *Engine) SetupIndexes(ctx context.Context) error {
 	slog.Info("Waiting for indexes to be ready...")
 	for _, def := range defs {
 		for attempts := 0; attempts < 120; attempts++ { // up to 2 minutes
-			ready, err := e.Store.IndexReady(ctx, def.Namespace, def.IndexName, e.Gen.KeyCount())
+			ready, err := e.Store.IndexReady(ctx, def.Namespace, def.Set, def.IndexName, e.Gen.KeyCount())
 			if err != nil {
 				slog.Warn("Index readiness check failed",
 					"index", def.IndexName,

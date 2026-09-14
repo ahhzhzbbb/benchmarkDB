@@ -109,7 +109,7 @@ type SearchStore interface {
 	CreateIndex(ctx context.Context, def IndexDefinition) error
 
 	// DropIndex removes a secondary index by name.
-	DropIndex(ctx context.Context, namespace, indexName string) error
+	DropIndex(ctx context.Context, namespace, set, indexName string) error
 
 	// EqualityQuery executes an equality lookup on an indexed field.
 	EqualityQuery(ctx context.Context, req EqualityQueryRequest) (*QueryResult, error)
@@ -120,7 +120,7 @@ type SearchStore interface {
 	// IndexReady checks whether the given index has finished building
 	// and is ready for queries. Returns true when the index covers the
 	// expected number of documents (within tolerance).
-	IndexReady(ctx context.Context, namespace, indexName string, expectedDocs int) (bool, error)
+	IndexReady(ctx context.Context, namespace, set, indexName string, expectedDocs int) (bool, error)
 }
 
 // DataStore is the combined port that each database adapter must implement.
