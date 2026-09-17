@@ -143,58 +143,129 @@ func (s *Store) RangeQuery(ctx context.Context, req datastore.RangeQueryRequest)
 	return s.executeFTSearch(ctx, idxName, query, "range", req.Field)
 }
 
-// IndexReady checks whether an index has finished building by examining
-// FT.INFO output for num_docs and indexing status.
+// IndexReady checks whether an index has finished building by calling FT.INFO.
+//
+// Design decisions:
+//   - Uses the full qualified index name (namespace:set:indexName) to match
+//     the name used at FT.CREATE time.
+//   - Treats "Unknown Index" / "SEARCH_INDEX_NOT_FOUND" errors as "not yet
+//     ready" (returns false, nil) so the caller can retry silently instead of
+//     logging a WARN on every poll tick.
+//   - Handles both RESP2 flat-array and RESP3 map responses from go-redis via
+//     a type switch, avoiding the hard []interface{} assertion that causes
+//     "unexpected FT.INFO response type" on newer Redis Stack builds.
 func (s *Store) IndexReady(ctx context.Context, namespace, set, indexName string, expectedDocs int) (bool, error) {
 	fullIndexName := makeIndexName(namespace, set, indexName)
-	
+
 	result, err := s.client.Do(ctx, "FT.INFO", fullIndexName).Result()
 	if err != nil {
-		return false, err
-	}
-
-	info, ok := result.([]interface{})
-	if !ok {
-		return false, fmt.Errorf("unexpected FT.INFO response type")
-	}
-
-	var numDocs int64
-	var indexing bool
-
-	for i := 0; i < len(info)-1; i += 2 {
-		key, ok := info[i].(string)
-		if !ok {
-			continue
+		// Index hasn't been created yet or is still initialising on this shard.
+		// These are transient conditions — treat them as "not ready" so the
+		// engine keeps polling rather than surfacing a WARN.
+		errStr := err.Error()
+		if strings.Contains(errStr, "Unknown Index") ||
+			strings.Contains(errStr, "SEARCH_INDEX_NOT_FOUND") {
+			slog.Debug("Index not found yet, will retry",
+				"index", fullIndexName,
+			)
+			return false, nil
 		}
-
-		switch key {
-		case "num_docs":
-			switch v := info[i+1].(type) {
-			case string:
-				numDocs, _ = strconv.ParseInt(v, 10, 64)
-			case int64:
-				numDocs = v
-			}
-		case "indexing":
-			switch v := info[i+1].(type) {
-			case string:
-				indexing = v == "1"
-			case int64:
-				indexing = v == 1
-			}
-		}
+		// Any other error (network, auth, etc.) is a real failure.
+		return false, fmt.Errorf("FT.INFO %s: %w", fullIndexName, err)
 	}
+
+	// parseFTInfo extracts num_docs and indexing status from the FT.INFO
+	// response. go-redis may return either:
+	//   - RESP2: []interface{}{"key", value, "key", value, ...}  (flat array)
+	//   - RESP3: map[interface{}]interface{}{"key": value, ...}  (map)
+	numDocs, indexing := parseFTInfo(result)
 
 	ready := !indexing && numDocs >= int64(expectedDocs)
 	if !ready {
-		slog.Debug("Index not ready",
-			"index", indexName,
+		slog.Debug("Index not ready yet",
+			"index", fullIndexName,
 			"num_docs", numDocs,
 			"expected", expectedDocs,
-			"indexing", indexing,
+			"still_indexing", indexing,
 		)
 	}
 	return ready, nil
+}
+
+// parseFTInfo extracts num_docs and indexing flag from a raw FT.INFO response.
+//
+// It handles the two wire formats that go-redis may return depending on the
+// RESP protocol version negotiated with the server:
+//
+//	RESP2 → []interface{}{"num_docs", "1000000", "indexing", "0", ...}
+//	RESP3 → map[interface{}]interface{}{"num_docs": int64(1000000), ...}
+func parseFTInfo(raw interface{}) (numDocs int64, indexing bool) {
+	switch v := raw.(type) {
+
+	// --- RESP2: flat key-value array ---
+	case []interface{}:
+		for i := 0; i+1 < len(v); i += 2 {
+			key, ok := v[i].(string)
+			if !ok {
+				continue
+			}
+			switch key {
+			case "num_docs":
+				numDocs = toInt64(v[i+1])
+			case "indexing":
+				indexing = toInt64(v[i+1]) == 1
+			}
+		}
+
+	// --- RESP3: map ---
+	case map[interface{}]interface{}:
+		for k, val := range v {
+			key, ok := k.(string)
+			if !ok {
+				continue
+			}
+			switch key {
+			case "num_docs":
+				numDocs = toInt64(val)
+			case "indexing":
+				indexing = toInt64(val) == 1
+			}
+		}
+
+	// --- RESP3: string-keyed map (some go-redis versions) ---
+	case map[string]interface{}:
+		for key, val := range v {
+			switch key {
+			case "num_docs":
+				numDocs = toInt64(val)
+			case "indexing":
+				indexing = toInt64(val) == 1
+			}
+		}
+
+	default:
+		// Unknown format — log and treat as not-ready so polling continues.
+		slog.Warn("Unrecognised FT.INFO response type; treating index as not ready",
+			"type", fmt.Sprintf("%T", raw),
+		)
+	}
+	return numDocs, indexing
+}
+
+// toInt64 coerces common numeric and string types returned by go-redis to int64.
+func toInt64(v interface{}) int64 {
+	switch val := v.(type) {
+	case int64:
+		return val
+	case int:
+		return int64(val)
+	case float64:
+		return int64(val)
+	case string:
+		n, _ := strconv.ParseInt(val, 10, 64)
+		return n
+	}
+	return 0
 }
 
 // executeFTSearch runs FT.SEARCH and parses the response into QueryResult.
