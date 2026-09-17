@@ -25,6 +25,9 @@ import (
 //     have built-in FT.SEARCH result types.
 
 // makeIndexName constructs a unique index name for Redis.
+// Format: {namespace}:{set}:{indexName}
+// This MUST match the name used in FT.CREATE (CreateIndex) and all callers
+// of FT.SEARCH / FT.INFO (EqualityQuery, RangeQuery, IndexReady).
 func makeIndexName(namespace, set, indexName string) string {
 	return namespace + ":" + set + ":" + indexName
 }
@@ -32,6 +35,22 @@ func makeIndexName(namespace, set, indexName string) string {
 // makePrefix constructs the key prefix that the index should cover.
 func makePrefix(namespace, set string) string {
 	return namespace + ":" + set + ":"
+}
+
+// makeStringIndexName returns the index name for a string (TAG) field,
+// matching the convention used in dataset.Generator.GetIndexDefinitions():
+//
+//	{set}_{field}_str_idx  →  FQ: {namespace}:{set}:{set}_{field}_str_idx
+func makeStringIndexName(namespace, set, field string) string {
+	return makeIndexName(namespace, set, set+"_"+field+"_str_idx")
+}
+
+// makeNumericIndexName returns the index name for a numeric field,
+// matching the convention used in dataset.Generator.GetIndexDefinitions():
+//
+//	{set}_{field}_num_idx  →  FQ: {namespace}:{set}:{set}_{field}_num_idx
+func makeNumericIndexName(namespace, set, field string) string {
+	return makeIndexName(namespace, set, set+"_"+field+"_num_idx")
 }
 
 // CreateIndex creates a secondary index using FT.CREATE.
@@ -105,21 +124,27 @@ func (s *Store) DropIndex(ctx context.Context, namespace, set, indexName string)
 }
 
 // EqualityQuery executes an equality query using FT.SEARCH.
-//   - String: @field:{value}  (TAG syntax)
-//   - Numeric: @field:[value value]
+//   - String fields: TAG syntax  →  @field:{value}
+//   - Numeric fields: range syntax →  @field:[value value]
+//
+// Index name convention mirrors dataset.Generator.GetIndexDefinitions():
+//   - String field  → makeStringIndexName → {ns}:{set}:{set}_{field}_str_idx
+//   - Numeric field → makeNumericIndexName → {ns}:{set}:{set}_{field}_num_idx
 func (s *Store) EqualityQuery(ctx context.Context, req datastore.EqualityQueryRequest) (*datastore.QueryResult, error) {
-	idxName := makeIndexName(req.Namespace, req.Set, "idx_"+req.Field)
+	var idxName, query string
 
-	var query string
 	switch v := req.Value.(type) {
 	case string:
-		// TAG query syntax: @field:{value}
-		// Escape special characters in the value.
+		// String field: TAG index, @field:{value} syntax.
+		idxName = makeStringIndexName(req.Namespace, req.Set, req.Field)
 		escaped := escapeTagValue(v)
 		query = fmt.Sprintf("@%s:{%s}", req.Field, escaped)
 	case int64:
+		// Numeric field: NUMERIC index, range syntax.
+		idxName = makeNumericIndexName(req.Namespace, req.Set, req.Field)
 		query = fmt.Sprintf("@%s:[%d %d]", req.Field, v, v)
 	case int:
+		idxName = makeNumericIndexName(req.Namespace, req.Set, req.Field)
 		query = fmt.Sprintf("@%s:[%d %d]", req.Field, v, v)
 	default:
 		return nil, &bencherr.QueryError{
@@ -134,10 +159,13 @@ func (s *Store) EqualityQuery(ctx context.Context, req datastore.EqualityQueryRe
 }
 
 // RangeQuery executes a numeric range query using FT.SEARCH.
-// Query: @field:[min max]
+// Query syntax: @field:[min max]
+//
+// Index name convention mirrors dataset.Generator.GetIndexDefinitions():
+//
+//	{ns}:{set}:{set}_{field}_num_idx
 func (s *Store) RangeQuery(ctx context.Context, req datastore.RangeQueryRequest) (*datastore.QueryResult, error) {
-	idxName := makeIndexName(req.Namespace, req.Set, "idx_"+req.Field)
-
+	idxName := makeNumericIndexName(req.Namespace, req.Set, req.Field)
 	query := fmt.Sprintf("@%s:[%d %d]", req.Field, req.Min, req.Max)
 
 	return s.executeFTSearch(ctx, idxName, query, "range", req.Field)
@@ -274,13 +302,27 @@ func toInt64(v interface{}) int64 {
 //
 //	[total_count, key1, [field1, val1, field2, val2, ...], key2, [...], ...]
 func (s *Store) executeFTSearch(ctx context.Context, indexName, query, queryType, field string) (*datastore.QueryResult, error) {
+	s.logger.Debug("FT.SEARCH executing",
+		"index", indexName,
+		"query", query,
+		"type", queryType,
+	)
+
 	result, err := s.client.Do(ctx, "FT.SEARCH", indexName, query).Result()
 	if err != nil {
+		// Log the actual index name and query so mismatches are immediately visible.
+		s.logger.Error("FT.SEARCH failed",
+			"index", indexName,
+			"query", query,
+			"type", queryType,
+			"field", field,
+			"error", err,
+		)
 		return nil, &bencherr.QueryError{
 			Database:  "Redis Cluster",
 			QueryType: queryType,
 			Field:     field,
-			Cause:     err,
+			Cause:     fmt.Errorf("FT.SEARCH index=%q query=%q: %w", indexName, query, err),
 		}
 	}
 
@@ -290,7 +332,7 @@ func (s *Store) executeFTSearch(ctx context.Context, indexName, query, queryType
 			Database:  "Redis Cluster",
 			QueryType: queryType,
 			Field:     field,
-			Cause:     fmt.Errorf("parsing FT.SEARCH result: %w", err),
+			Cause:     fmt.Errorf("parsing FT.SEARCH result (index=%q): %w", indexName, err),
 		}
 	}
 
