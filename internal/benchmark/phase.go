@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
-	"time"
+	"strings"
 
 	"benchmarkDB/internal/datastore"
 )
@@ -40,8 +40,14 @@ func (p *ConnectivityPhase) Run(ctx context.Context, e *Engine) (*PhaseOutput, e
 	slog.Info("Phase 1: Connectivity & Correctness check")
 	passed := true
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	// Use a fixed seed for reproducibility: connectivity check must be deterministic
+	// so failures are easy to reproduce without re-running the full workload.
+	rng := rand.New(rand.NewSource(42))
 	rec := e.Gen.RandomRecord(rng)
+
+	// ----------------------------------------------------------------
+	// 1. Primary-key operations: SET → GET → verify → DELETE
+	// ----------------------------------------------------------------
 
 	// SET
 	err := e.Store.Set(ctx, rec.Namespace, rec.Set, rec.Key, rec.Fields, 0)
@@ -50,7 +56,7 @@ func (p *ConnectivityPhase) Run(ctx context.Context, e *Engine) (*PhaseOutput, e
 		return &PhaseOutput{PhaseName: p.Name(), Passed: &passed},
 			fmt.Errorf("connectivity SET failed: %w", err)
 	}
-	slog.Info("  SET: OK")
+	slog.Info("  SET: OK", "key", rec.Namespace+":"+rec.Set+":"+rec.Key)
 
 	// GET + verify
 	got, err := e.Store.Get(ctx, rec.Namespace, rec.Set, rec.Key)
@@ -62,7 +68,8 @@ func (p *ConnectivityPhase) Run(ctx context.Context, e *Engine) (*PhaseOutput, e
 	if got == nil {
 		passed = false
 		return &PhaseOutput{PhaseName: p.Name(), Passed: &passed},
-			fmt.Errorf("connectivity GET returned nil for key %s", rec.Key)
+			fmt.Errorf("connectivity GET returned nil for key %s:%s:%s",
+				rec.Namespace, rec.Set, rec.Key)
 	}
 	slog.Info("  GET: OK", "key", got.Key)
 
@@ -75,8 +82,30 @@ func (p *ConnectivityPhase) Run(ctx context.Context, e *Engine) (*PhaseOutput, e
 	}
 	slog.Info("  DELETE: OK")
 
+	// ----------------------------------------------------------------
+	// 2. Secondary-index preflight: verify indexes exist before querying.
+	//
+	//    If indexes are missing the FT.SEARCH error message is cryptic
+	//    ("SEARCH_INDEX_NOT_FOUND"). We surface a clear, actionable error
+	//    here instead: "run setup-index first".
+	// ----------------------------------------------------------------
+	if err := p.checkIndexesReady(ctx, e); err != nil {
+		passed = false
+		return &PhaseOutput{PhaseName: p.Name(), Passed: &passed}, err
+	}
+
+	// ----------------------------------------------------------------
+	// 3. Secondary-index queries: EQUALITY + RANGE
+	// ----------------------------------------------------------------
+
 	// Equality Query
 	field, value := e.Gen.RandomEqualityQuery(rng)
+	slog.Info("  EQUALITY_QUERY: attempting",
+		"field", field,
+		"value", value,
+		"namespace", rec.Namespace,
+		"set", rec.Set,
+	)
 	_, err = e.Store.EqualityQuery(ctx, datastore.EqualityQueryRequest{
 		Namespace: rec.Namespace,
 		Set:       rec.Set,
@@ -92,6 +121,11 @@ func (p *ConnectivityPhase) Run(ctx context.Context, e *Engine) (*PhaseOutput, e
 
 	// Range Query
 	rField, rMin, rMax := e.Gen.RandomRangeQuery(rng)
+	slog.Info("  RANGE_QUERY: attempting",
+		"field", rField,
+		"min", rMin,
+		"max", rMax,
+	)
 	_, err = e.Store.RangeQuery(ctx, datastore.RangeQueryRequest{
 		Namespace: rec.Namespace,
 		Set:       rec.Set,
@@ -108,6 +142,45 @@ func (p *ConnectivityPhase) Run(ctx context.Context, e *Engine) (*PhaseOutput, e
 
 	slog.Info("Phase 1: All connectivity checks passed")
 	return &PhaseOutput{PhaseName: p.Name(), Passed: &passed}, nil
+}
+
+// checkIndexesReady verifies that all required secondary indexes are present
+// and ready on the database before attempting to query them.
+//
+// It checks each index definition from the generator. If any index is missing
+// or not yet ready, it returns a clear, actionable error message that tells
+// the operator which exact index is missing and how to fix it.
+func (p *ConnectivityPhase) checkIndexesReady(ctx context.Context, e *Engine) error {
+	defs := e.Gen.GetIndexDefinitions()
+	var missing []string
+
+	for _, def := range defs {
+		ready, err := e.Store.IndexReady(ctx, def.Namespace, def.Set, def.IndexName, 1)
+		if err != nil {
+			// IndexReady already returns nil for "not found" — a real error here
+			// means something more serious (network, auth, etc.).
+			return fmt.Errorf(
+				"checking index %q (%s:%s): %w — verify Redis Query Engine is available",
+				def.IndexName, def.Namespace, def.Set, err,
+			)
+		}
+		if !ready {
+			missing = append(missing, fmt.Sprintf("%s:%s:%s_%s_*_idx",
+				def.Namespace, def.Set, def.Set, def.Field))
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"secondary indexes not ready (%d missing): [%s]\n"+
+				"  → run 'benchmark setup-index --config <file>' first, "+
+				"or use 'benchmark run' which sets up indexes automatically",
+			len(missing), strings.Join(missing, ", "),
+		)
+	}
+
+	slog.Info("  INDEX_PREFLIGHT: all indexes ready", "count", len(defs))
+	return nil
 }
 
 // ---------- Phase 2: Single Operation ----------
